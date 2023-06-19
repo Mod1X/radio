@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $.Release.Name }}-radio-deployment
+  labels:
+    {{- template "radio.labels" . }}
+    app: {{ $.Release.Name }}-radio
+spec:
+  selector:
+    matchLabels:
+      app: {{ $.Release.Name }}-radio
+  template:
+    metadata:
+      annotations:
+  {{- if $.Values.config }}
+        checksum/config: {{ print $.Values.config | sha256sum }}
+  {{- end }}
+  {{- if $.Values.liquidsoap.entrypoint }}
+        checksum/liquidsoap-entrypoint: {{ print $.Values.liquidsoap.entrypoint | sha256sum }}
+  {{- end }}
+  {{- if $.Values.aws.entrypoint }}
+        checksum/aws-entrypoint: {{ print $.Values.aws.entrypoint | sha256sum }}
+  {{- end }}
+  {{- if $.Values.mpd.entrypoint }}
+        checksum/mpd-entrypoint: {{ print $.Values.mpd.entrypoint | sha256sum }}
+  {{- end }}
+      labels:
+        app: {{ $.Release.Name }}-radio
+    spec:
+      hostAliases:
+      - ip: 127.0.0.1
+        hostnames:
+        - icecast
+        - mpd
+      containers:
+      - name: liquidsoap
+        image: savonet/liquidsoap:v2.1.2
+        command: [ "/usr/bin/liquidsoap", "/entrypoint.liq" ]
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: liquidsoap-config
+          mountPath: /entrypoint.liq
+          subPath: entrypoint.liq
+          readOnly: true
+      - name: icecast
+        image: vitiman/alpine-icecast:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+      - name: ympd
+        image: vitiman/alpine-ympd:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+      - name: mpd
+        image: vitiman/alpine-mpd:latest
+        imagePullPolicy: IfNotPresent
+        command: [ "sh", "/entrypoint" ]
+        ports:
+        - containerPort: 6600
+        startupProbe:
+          exec:
+            command:
+            - cat
+            - /var/lib/mpd/music/track.txt
+          failureThreshold: 90
+          periodSeconds: 10
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/mpd/music/
+        - name: entrypoint-mpd
+          mountPath: /entrypoint
+          subPath: entrypoint.mpd
+          readOnly: true
+      initContainers:
+      - name: download
+        image: amazon/aws-cli:latest
+        imagePullPolicy: IfNotPresent
+        command: [ "sh", "/entrypoint" ]
+        env:
+  {{- range $key, $val := $.Values.config.secrets }}
+        - name: {{ $key }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ $.Release.Name }}-radio-secret
+              key: {{ $key }}
+  {{- end }}
+        volumeMounts:
+        - name: data
+          mountPath: /aws/data
+        - name: entrypoint-aws
+          mountPath: /entrypoint
+          subPath: entrypoint.aws
+          readOnly: true
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: liquidsoap-config
+        configMap:
+          name: {{ $.Release.Name }}-radio-config
+          optional: true
+          items:
+          - key: entrypoint.liq
+            path: entrypoint.liq
+      - name: entrypoint-aws
+        configMap:
+          name: {{ $.Release.Name }}-radio-config
+          optional: true
+          items:
+          - key: entrypoint.aws
+            path: entrypoint.aws
+      - name: entrypoint-mpd
+        configMap:
+          name: {{ $.Release.Name }}-radio-config
+          optional: true
+          items:
+          - key: entrypoint.mpd
+            path: entrypoint.mpd

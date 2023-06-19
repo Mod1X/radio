@@ -1,0 +1,118 @@
+---
+- name: Creates deploy dir
+  file:
+    path: ~/radio_runtime
+    state: directory
+
+- name: check music.sha256
+  stat:
+    path: ~/radio_runtime/music.sha256
+  register: music
+
+- name: create music.sha256
+  file:
+    path: ~/radio_runtime/music.sha256
+    state: touch
+    owner: root
+    group: root
+    mode: 0755
+  when: not music.stat.exists
+
+- name: new video source
+  stat:
+    path: ~/radio_runtime/video.mp4
+  register: video
+
+- name: move video
+  shell: mv ~/radio_runtime/video.mp4 ~/radio_runtime/play.mp4
+  when: video.stat.exists
+  notify:
+  - restart liquidsoap
+
+- name: create mpc alias
+  blockinfile:
+    path: /root/.bashrc
+    block: |
+      alias next='docker exec --tty mpd mpc next'
+      alias prev='docker exec --tty mpd mpc prev'
+
+- name: Use sha256 to calculate checksum
+  ansible.builtin.stat:
+    path: ~/radio_runtime/music/
+    checksum_algorithm: sha256
+  register: music_dir_ls
+
+- name: music dir sha256
+  set_fact: 
+    music_dir_sha256: "{{ music_dir_ls | hash('sha256') }}"
+
+- name: read music.sha256
+  slurp:
+    src: ~/radio_runtime/music.sha256
+  register: slurped_user_data
+
+- name: Decode music.sha256 #(hack)
+  set_fact:
+    old_music_dir_sha256: "{{ slurped_user_data.content | b64decode }}"
+
+- name: template aws
+  template:
+    src: entrypoint.aws.sh.j2
+    dest: ~/radio_runtime/entrypoint.aws.sh
+    owner: root
+    group: root
+    mode: 0755
+
+- name: template liquidsoap
+  template:
+    src: entrypoint.liq.j2
+    dest: ~/radio_runtime/entrypoint.liq
+    owner: root
+    group: root
+    mode: 0755
+  notify:
+  - restart liquidsoap
+
+- name: template mpd entrypoint.sh
+  template:
+    src: entrypoint.mpd.sh.j2
+    dest: ~/radio_runtime/entrypoint.mpd.sh
+    owner: root
+    group: root
+    mode: 0755
+  notify:
+  - restart liquidsoap
+
+- name: copy font
+  copy:
+    src: font.ttf
+    dest: ~/radio_runtime/font.ttf
+    owner: root
+    group: root
+    mode: 0755
+
+- name: template docker
+  template: 
+    src: "docker-compose.yaml.j2" 
+    dest: ~/radio_runtime/docker-compose.yaml
+    owner: root 
+    group: root 
+    mode: 0644
+
+- name: deploy
+  docker_compose:
+    project_src: ~/radio_runtime/
+    state: present
+    remove_orphans: yes
+   
+- name: restart mpd
+  shell: docker restart mpd
+  when: old_music_dir_sha256 != music_dir_sha256
+  notify:
+  - restart liquidsoap
+
+- name: new sha256 output
+  local_action: 
+    module: copy 
+    content: "{{ music_dir_sha256 }}"
+    dest: ~/radio_runtime/music.sha256

@@ -1,0 +1,88 @@
+settings:
+  domain: radio.example.org
+
+# openssl passwd -apr1 ${password} | base64
+auth:
+  user: ""
+
+config:
+  env:
+    RADIO_URL: "http://icecast:8000/mpd"
+    VBR: "4500k"
+    VIDEO_SOURCE: "video.mp4"
+    FONTSIZE: "48"
+  secrets:
+    YT_TOKEN: ""
+    AWS_ENDPOINT: ""
+    AWS_DEFAULT_REGION: ""
+    AWS_ACCESS_KEY_ID: ""
+    AWS_SECRET_ACCESS_KEY: ""
+    BUCKET: ""
+
+aws:
+  entrypoint: |
+    echo "[default]" > /aws/credentials
+    echo "region = ${AWS_DEFAULT_REGION}" >> /aws/credentials
+    echo "aws_access_key_id = ${AWS_ACCESS_KEY_ID}" >> /aws/credentials
+    echo "aws_secret_access_key = ${AWS_SECRET_ACCESS_KEY}" >> /aws/credentials
+    aws --endpoint-url="$AWS_ENDPOINT" s3 cp s3://${BUCKET}/ /aws/data/ --recursive
+    mv /aws/data/**/*.mp3 /aws/data/
+
+mpd:
+  entrypoint: |
+    mpd --stdout --no-daemon &
+    while ! nc -z localhost 6600; do   
+      sleep 1
+    done
+    mpc repeat on
+    mpc random on
+    cd /var/lib/mpd/music/
+    ls -1 *.mp3 > /var/lib/mpd/playlists/playlist.m3u
+    sleep 1
+    mpc update
+    sleep 1
+    mpc load playlist
+    sleep 1
+    mpc play
+    while :
+    do
+      mpc current | sed 's/\.mp3//' > /var/lib/mpd/music/track.txt
+      sleep 5
+    done
+
+liquidsoap:
+  entrypoint: |
+    #!/usr/bin/liquidsoap
+    log.file.path.set("/tmp/basic-radio.log")
+    settings.log.stdout.set(true)
+    settings.tag.encodings.set(["UTF-8", "ISO-8859-1"])
+    video.frame.height.set(1080)
+    video.frame.width.set(1920)
+
+    source_audio = input.http("{{ .Values.config.env.RADIO_URL }}")
+    source_video = single("/data/{{ .Values.config.env.VIDEO_SOURCE }}")
+    source_mux = mux_video(video=source_video,source_audio)
+
+    srightnow = ref("")
+    def update_time()
+        srightnow := process.read("cat /data/track.txt")
+    end
+    thread.run(every=1.,update_time)
+    def gettime() = !srightnow end
+
+    stream = video.add_text(font="/data/font.ttf", size={{ .Values.config.env.FONTSIZE }}, y=0, gettime, source_mux)
+    stream = video.resize(height=1080, width=1920, stream)
+
+    stream = ffmpeg.encode.audio_video(
+        %ffmpeg(
+            %audio(codec="aac", b="256k", flags="+global_header"),
+            %video(codec="libx264", b="{{ .Values.config.env.VBR }}", flags="+global_header")
+        ),
+        stream
+    )
+    flv = %ffmpeg(
+        format="flv",
+        %audio.copy,
+        %video.copy,
+    )
+    output.youtube.live.rtmp(encoder=flv, fallible=true, key="{{ .Values.config.secrets.YT_TOKEN }}", stream)
